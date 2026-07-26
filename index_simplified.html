@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>AI 쓰레기 분류기</title>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@latest/dist/teachablemachine-image.min.js"></script>
+  <style>
+    body { margin:0; padding:16px; font-family:system-ui,-apple-system,sans-serif; text-align:center; background:#f5f7fa; color:#202124; }
+    h1 { font-size:23px; margin:4px 0 14px; }
+    button { width:min(92vw,420px); margin:7px auto; padding:14px; border:0; border-radius:12px; font-size:17px; font-weight:700; display:block; }
+    #startButton { background:#1a73e8; color:white; }
+    #classifyButton { background:#188038; color:white; display:none; }
+    #webcam-container canvas { width:min(92vw,420px); height:auto; border-radius:14px; background:#ddd; }
+    #status { margin:10px 0; font-weight:700; }
+    #result { width:min(86vw,390px); margin:12px auto; padding:14px; border-radius:12px; background:white; box-shadow:0 2px 10px rgba(0,0,0,.08); font-size:21px; font-weight:800; }
+    .score { display:flex; justify-content:space-between; width:min(86vw,390px); margin:6px auto; padding:8px 10px; box-sizing:border-box; border-radius:8px; background:white; }
+    .hint { font-size:13px; color:#5f6368; line-height:1.45; }
+  </style>
+</head>
+<body>
+  <h1>AI 쓰레기 분류기</h1>
+  <button id="startButton" type="button">카메라 시작</button>
+  <button id="classifyButton" type="button">현재 물체 분류하기</button>
+  <div id="status">카메라 시작 버튼을 눌러 주세요.</div>
+  <div id="webcam-container"></div>
+  <div id="result">분류 결과 대기 중</div>
+  <div id="scores"></div>
+  <p class="hint">물체 하나만 화면 중앙에 놓고 분류 버튼을 누르세요.<br>신뢰도가 90% 이상일 때만 결과를 보냅니다.</p>
+
+<script>
+  const MODEL_BASE = "https://teachablemachine.withgoogle.com/models/P7JcT65j3/";
+  const MODEL_URL = MODEL_BASE + "model.json";
+  const METADATA_URL = MODEL_BASE + "metadata.json";
+
+  const CONFIDENCE_THRESHOLD = 0.90;
+  const SAMPLE_COUNT = 8;
+  const SAMPLE_DELAY_MS = 120;
+
+  let model = null;
+  let webcam = null;
+  let running = false;
+
+  const startButton = document.getElementById("startButton");
+  const classifyButton = document.getElementById("classifyButton");
+  const statusBox = document.getElementById("status");
+  const resultBox = document.getElementById("result");
+  const scoresBox = document.getElementById("scores");
+
+  function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  function sendToAppInventor(message) {
+    if (window.AppInventor && typeof window.AppInventor.setWebViewString === "function") {
+      window.AppInventor.setWebViewString(message);
+    }
+  }
+
+  async function startCamera() {
+    if (running) return;
+
+    try {
+      startButton.disabled = true;
+      statusBox.textContent = "AI 모델을 불러오는 중...";
+      model = await tmImage.load(MODEL_URL, METADATA_URL);
+
+      webcam = new tmImage.Webcam(320, 320, false);
+      await webcam.setup({ facingMode: "environment" });
+      await webcam.play();
+
+      document.getElementById("webcam-container").appendChild(webcam.canvas);
+
+      running = true;
+      classifyButton.style.display = "block";
+      startButton.style.display = "none";
+      statusBox.textContent = "카메라 준비 완료";
+      requestAnimationFrame(updateCamera);
+    } catch (error) {
+      console.error(error);
+      startButton.disabled = false;
+      statusBox.textContent = "카메라를 시작하지 못했습니다.";
+      resultBox.textContent = "오류: " + (error.message || error);
+    }
+  }
+
+  async function updateCamera() {
+    if (!running || !webcam) return;
+    webcam.update();
+    requestAnimationFrame(updateCamera);
+  }
+
+  async function classifyCurrentObject() {
+    if (!running || !model || !webcam) return;
+
+    classifyButton.disabled = true;
+    statusBox.textContent = "여러 프레임을 분석하는 중...";
+
+    try {
+      const totals = {};
+
+      for (let i = 0; i < SAMPLE_COUNT; i++) {
+        webcam.update();
+        const predictions = await model.predict(webcam.canvas);
+
+        for (const item of predictions) {
+          totals[item.className] = (totals[item.className] || 0) + item.probability;
+        }
+
+        await sleep(SAMPLE_DELAY_MS);
+      }
+
+      const averaged = Object.entries(totals)
+        .map(([className, total]) => ({ className, probability: total / SAMPLE_COUNT }))
+        .sort((a, b) => b.probability - a.probability);
+
+      scoresBox.innerHTML = "";
+      for (const item of averaged) {
+        const row = document.createElement("div");
+        row.className = "score";
+        row.innerHTML = `<span>${item.className}</span><strong>${(item.probability * 100).toFixed(1)}%</strong>`;
+        scoresBox.appendChild(row);
+      }
+
+      const best = averaged[0];
+      if (!best) throw new Error("분류 결과가 없습니다.");
+
+      const label = best.className.trim().toLowerCase();
+      const percent = best.probability * 100;
+
+      if (best.probability < CONFIDENCE_THRESHOLD) {
+        resultBox.textContent = `판단 보류 (${percent.toFixed(1)}%)`;
+        statusBox.textContent = "물체를 더 가까이 놓고 다시 시도하세요.";
+        sendToAppInventor("unknown");
+      } else if (["plastic", "paper", "can"].includes(label)) {
+        resultBox.textContent = `${label} (${percent.toFixed(1)}%)`;
+        statusBox.textContent = "분류 결과를 앱으로 전송했습니다.";
+        sendToAppInventor(label);
+      } else {
+        resultBox.textContent = `알 수 없는 클래스: ${best.className}`;
+        statusBox.textContent = "클래스 이름을 확인하세요.";
+        sendToAppInventor("unknown");
+      }
+    } catch (error) {
+      console.error(error);
+      statusBox.textContent = "분류 중 오류가 발생했습니다.";
+      resultBox.textContent = "오류: " + (error.message || error);
+    } finally {
+      classifyButton.disabled = false;
+    }
+  }
+
+  startButton.addEventListener("click", startCamera);
+  classifyButton.addEventListener("click", classifyCurrentObject);
+</script>
+</body>
+</html>
